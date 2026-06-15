@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <title>WebXR & TensorFlow.js: Тренування ML для Автомасштабування</title>
+  
+  <script src="https://aframe.io/releases/1.3.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
+  
+  <script>
+    AFRAME.registerComponent('mouse-zoom', {
+      init: function () {
+        window.addEventListener('wheel', (e) => {
+          let camera = this.el.getAttribute('camera');
+          let fov = Math.max(20, Math.min(camera.fov + (e.deltaY > 0 ? 5 : -5), 100)); 
+          this.el.setAttribute('camera', 'fov', fov);
+        });
+      }
+    });
+  </script>
+
+  <style>
+    body { margin: 0; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none; }
+    
+    .panel {
+      position: absolute; background: rgba(15, 20, 25, 0.9); color: #ecf0f1; 
+      padding: 20px; border-radius: 12px; box-shadow: 0 8px 20px rgba(0,0,0,0.7); 
+      z-index: 1000; backdrop-filter: blur(5px); border: 1px solid #333;
+    }
+    
+    #stats-dashboard { top: 20px; right: 20px; min-width: 260px; border-top: 4px solid #3498db; }
+    #ml-training-panel { top: 20px; left: 20px; width: 280px; border-top: 4px solid #9b59b6; }
+    #control-panel { bottom: 30px; right: 20px; width: 260px; border-top: 4px solid #e67e22; }
+    #info-panel { bottom: 30px; left: 30px; width: 320px; border-left: 6px solid #3498db; display: none; }
+
+    .panel-title { font-weight: bold; border-bottom: 1px solid #444; padding-bottom: 8px; margin-bottom: 12px; text-transform: uppercase; font-size: 14px; color: #fff;}
+    .metric-line { margin: 8px 0; font-size: 14px; display: flex; justify-content: space-between; align-items: center;}
+    .metric-value { font-weight: bold; font-family: monospace; font-size: 15px; }
+    
+    .status-ok { color: #2ecc71; }
+    .status-fail { color: #e74c3c; }
+    .status-warn { color: #f1c40f; }
+
+    #close-btn { position: absolute; top: 10px; right: 15px; cursor: pointer; color: #95a5a6; font-size: 16px; }
+    #close-btn:hover { color: white; }
+    #info-title { margin: 0 0 10px 0; font-size: 18px; color: #34dbcb; }
+    #info-desc { margin: 0; font-size: 14px; line-height: 1.5; color: #bdc3c7; }
+
+    input[type="range"] { width: 100%; accent-color: #e67e22; cursor: pointer; margin-top: 10px;}
+    input[type="range"]:disabled { opacity: 0.4; cursor: not-allowed; }
+    
+    .switch-label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px; color: #ecf0f1; margin-bottom: 15px;}
+    input[type="checkbox"] { width: 18px; height: 18px; accent-color: #9b59b6; cursor: pointer; }
+
+    .btn {
+      width: 100%; color: white; border: none; padding: 12px 10px; margin-top: 10px;
+      font-size: 14px; font-weight: bold; border-radius: 6px; cursor: pointer; transition: 0.2s;
+    }
+    #train-btn { background-color: #8e44ad; box-shadow: 0 4px 10px rgba(142, 68, 173, 0.4); }
+    #train-btn:hover { background-color: #9b59b6; }
+    #train-btn:disabled { background-color: #555; cursor: not-allowed; box-shadow: none; color: #888;}
+    
+    #hint { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); background: rgba(0, 0, 0, 0.6); color: white; padding: 8px 20px; border-radius: 20px; font-size: 14px; pointer-events: none; z-index: 1000;}
+  </style>
+</head>
+<body>
+
+  <div id="hint">Колесо миші — Зум. Наведіть курсор та клікайте на об'єкти!</div>
+
+  <div id="ml-training-panel" class="panel">
+    <div class="panel-title">🧠 TensorFlow.js Модель</div>
+    <div class="metric-line">Стан мережі: <span id="tf-status" class="metric-value status-fail">Не навчена</span></div>
+    <div class="metric-line">Епоха навчання: <span id="tf-epoch" class="metric-value">0 / 100</span></div>
+    <div class="metric-line">Помилка (Loss): <span id="tf-loss" class="metric-value">--</span></div>
+    <div style="font-size: 12px; color: #95a5a6; margin-top: 10px; margin-bottom: 10px;">Модель вивчає циклічність трафіку студентів для предиктивного масштабування.</div>
+    <button id="train-btn" class="btn">▶ Почати тренування</button>
+  </div>
+  
+  <div id="stats-dashboard" class="panel">
+    <div class="panel-title">Моніторинг Серверів</div>
+    <div class="metric-line">Реальний Трафік: <span id="real-traffic-val" class="metric-value" style="color: #34dbcb;">30%</span></div>
+    <div class="metric-line">Виділено ресурсів: <span id="allocated-val" class="metric-value">30%</span></div>
+    <hr style="border:0; border-top:1px solid #444; margin:10px 0;">
+    <div class="metric-line">Стан кластера: <span id="cluster-state" class="metric-value status-ok">СТАБІЛЬНО</span></div>
+    <div class="metric-line">Активні сервіси: <span id="blocks-val" class="metric-value">0</span></div>
+  </div>
+
+  <div id="control-panel" class="panel">
+    <div class="panel-title">Управління Оркестратором</div>
+    <label class="switch-label">
+      <input type="checkbox" id="auto-mode-toggle">
+      Включити ML-Оркестратор
+    </label>
+    <div style="margin-top: 15px;">
+      <div style="display: flex; justify-content: space-between; font-size: 13px;">
+        <span>Ручне керування ресурсами:</span>
+        <span id="manual-load-display" style="font-weight:bold; color:#e67e22;">50%</span>
+      </div>
+      <input type="range" id="manual-load-slider" min="10" max="100" value="50">
+    </div>
+  </div>
+
+  <div id="info-panel" class="panel">
+    <div id="close-btn">✕</div>
+    <h3 id="info-title">Назва</h3>
+    <p id="info-desc">Опис...</p>
+  </div>
+
+  <a-scene cursor="rayOrigin: mouse; raycaster: objects: .clickable; lineHoverPrecision: 0.1" raycaster="objects: .clickable">
+    <a-sky color="#1A252C"></a-sky>
+    <a-grid position="0 0 0" material="color: #2C3E50; src: url(https://cdn.aframe.io/a-painter/images/floor.jpg); repeat: 20 20" rotation="-90 0 0" scale="20 20 20"></a-grid>
+
+    <a-entity position="-2 0 -4">
+      <a-box id="server-main" class="clickable" position="0 0.5 0" width="1.5" height="1" depth="1.5" color="#3498DB" animation__hover="property: scale; to: 1.05 1.05 1.05; startEvents: mouseenter; dur: 200" animation__leave="property: scale; to: 1 1 1; startEvents: mouseleave; dur: 200"></a-box>
+      <a-text value="MAIN SERVER" position="-0.7 1.2 0" color="#3498DB" scale="0.6 0.6 0.6"></a-text>
+    </a-entity>
+
+    <a-entity position="2 0 -4">
+      <a-box id="server-backup" class="clickable" position="0 0.5 0" width="1.5" height="1" depth="1.5" color="#7F8C8D" animation__hover="property: scale; to: 1.05 1.05 1.05; startEvents: mouseenter; dur: 200" animation__leave="property: scale; to: 1 1 1; startEvents: mouseleave; dur: 200"></a-box>
+      <a-text value="BACKUP SERVER" position="-0.8 1.2 0" color="#7F8C8D" scale="0.6 0.6 0.6"></a-text>
+    </a-entity>
+
+    <a-cylinder position="0 0.2 -4" radius="0.05" height="4" rotation="0 0 90" color="#555" opacity="0.6"></a-cylinder>
+
+    <a-entity id="data-blocks-group"></a-entity>
+    
+    <a-entity position="0 1.6 0">
+      <a-camera look-controls wasd-controls mouse-zoom></a-camera>
+    </a-entity>
+  </a-scene>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', async () => {
+      // --- UI ---
+      const infoPanel = document.getElementById('info-panel');
+      const infoTitle = document.getElementById('info-title');
+      const infoDesc = document.getElementById('info-desc');
+      const autoToggle = document.getElementById('auto-mode-toggle');
+      const manualSlider = document.getElementById('manual-load-slider');
+      const manualDisplay = document.getElementById('manual-load-display');
+      const trainBtn = document.getElementById('train-btn');
+      
+      document.getElementById('close-btn').addEventListener('click', () => infoPanel.style.display = 'none');
+      
+      function showInfo(title, description, color) {
+        infoTitle.textContent = title; 
+        infoTitle.style.color = color; 
+        infoDesc.textContent = description;
+        infoPanel.style.borderLeftColor = color; 
+        infoPanel.style.display = 'block';
+      }
+
+      document.getElementById('server-main').addEventListener('click', () => showInfo("Основний Сервер (Primary Node)", "Обробляє 100% запитів у штатному режимі. Якщо 'Реальний трафік' значно перевищить 'Виділені ресурси', сервер перевантажиться і спалахне червоним.", "#3498DB"));
+      document.getElementById('server-backup').addEventListener('click', () => showInfo("Резервний Сервер (Secondary Node)", "Гарячий резерв. Миттєво підхоплює всі мікросервіси (Failover) на себе, якщо основний сервер падає.", "#f39c12"));
+
+      // --- TENSORFLOW.JS ---
+      const model = tf.sequential();
+      model.add(tf.layers.dense({units: 16, inputShape: [1], activation: 'relu'}));
+      model.add(tf.layers.dense({units: 16, activation: 'relu'}));
+      model.add(tf.layers.dense({units: 1, activation: 'sigmoid'}));
+      model.compile({optimizer: tf.train.adam(0.05), loss: 'meanSquaredError'});
+      
+      let isModelTrained = false;
+
+      trainBtn.addEventListener('click', async () => {
+        trainBtn.disabled = true;
+        trainBtn.textContent = "⚙ Тренування...";
+        document.getElementById('tf-status').textContent = "В процесі...";
+        document.getElementById('tf-status').className = "metric-value status-warn";
+
+        const xData = []; const yData = [];
+        for (let i = 0; i < 200; i++) {
+          let t = i / 200; 
+          xData.push([t]);
+          yData.push([(Math.sin(t * Math.PI * 2) + 1) / 2 * 0.8 + 0.1]); 
+        }
+        const xs = tf.tensor2d(xData);
+        const ys = tf.tensor2d(yData);
+
+        await model.fit(xs, ys, {
+          epochs: 100,
+          callbacks: {
+            onEpochEnd: (epoch, logs) => {
+              document.getElementById('tf-epoch').textContent = `${epoch + 1} / 100`;
+              document.getElementById('tf-loss').textContent = logs.loss.toFixed(4);
+            }
+          }
+        });
+
+        isModelTrained = true;
+        document.getElementById('tf-status').textContent = "НАВЧЕНА";
+        document.getElementById('tf-status').className = "metric-value status-ok";
+        trainBtn.textContent = "✅ Мережа готова";
+        trainBtn.style.backgroundColor = "#2ecc71";
+        
+        xs.dispose(); ys.dispose(); 
+      });
+
+      // --- СИСТЕМНА ЛОГІКА ---
+      let isMLMode = false;
+      let blocks = []; 
+      const dataGroup = document.getElementById('data-blocks-group');
+      const mainServerBox = document.getElementById('server-main');
+      const backupServerBox = document.getElementById('server-backup');
+      const clusterState = document.getElementById('cluster-state');
+
+      autoToggle.addEventListener('change', (e) => {
+        isMLMode = e.target.checked;
+        manualSlider.disabled = isMLMode;
+        if(isMLMode && !isModelTrained) {
+          alert("Увага: Нейромережа ще не навчена! Вона буде видавати випадкові ресурси, що може призвести до збою кластера.");
+        }
+      });
+      manualSlider.addEventListener('input', (e) => { manualDisplay.textContent = e.target.value + '%'; });
+
+      setInterval(() => {
+        let timeNorm = (Date.now() % 20000) / 20000; 
+        let realTraffic = (Math.sin(timeNorm * Math.PI * 2) + 1) / 2 * 0.8 + 0.1; 
+        document.getElementById('real-traffic-val').textContent = `${Math.round(realTraffic * 100)}%`;
+
+        let allocatedResources = 0;
+
+        if (isMLMode) {
+          const predictionTensor = model.predict(tf.tensor2d([[timeNorm]]));
+          allocatedResources = predictionTensor.dataSync()[0];
+          predictionTensor.dispose(); 
+        } else {
+          allocatedResources = manualSlider.value / 100;
+        }
+
+        document.getElementById('allocated-val').textContent = `${Math.round(allocatedResources * 100)}%`;
+
+        let isCrashed = (realTraffic - allocatedResources) > 0.15;
+        let activeX = isCrashed ? 2 : -2; 
+
+        if (isCrashed) {
+          mainServerBox.setAttribute('color', '#E74C3C'); 
+          backupServerBox.setAttribute('color', '#F39C12'); 
+          clusterState.textContent = "ЗБІЙ: НЕСТАЧА РЕСУРСІВ";
+          clusterState.className = "metric-value status-fail";
+        } else {
+          mainServerBox.setAttribute('color', '#3498DB'); 
+          backupServerBox.setAttribute('color', '#7F8C8D'); 
+          clusterState.textContent = "ШТАТНА РОБОТА";
+          clusterState.className = "metric-value status-ok";
+        }
+
+        let targetBlockCount = Math.floor(allocatedResources * 30);
+        document.getElementById('blocks-val').textContent = targetBlockCount;
+
+        // Генерація мікросервісів
+        while (blocks.length < targetBlockCount) {
+          let block = document.createElement('a-box');
+          block.setAttribute('width', '0.2'); 
+          block.setAttribute('height', '0.2'); 
+          block.setAttribute('depth', '0.2');
+          
+          // ПОВЕРНУТО СТАРИЙ ДИЗАЙН: Дротяний куб (Wireframe)
+          block.setAttribute('wireframe', 'true'); 
+          block.classList.add('clickable'); 
+          
+          let offsetX = (Math.random() - 0.5) * 1.5; 
+          let y = 1.5 + Math.random() * 1.5; 
+          let offsetZ = -4 + (Math.random() - 0.5) * 1.5;
+          
+          block.setAttribute('position', `${activeX + offsetX} ${y} ${offsetZ}`);
+          block.setAttribute('color', isCrashed ? '#F1C40F' : '#00FFCC');
+          
+          let speed = Math.max(300, 3000 - (allocatedResources * 2700));
+          block.setAttribute('animation__rot', `property: rotation; to: 360 360 0; loop: true; dur: ${speed}; easing: linear`);
+          block.setAttribute('animation__spawn', 'property: scale; to: 1 1 1; dur: 300');
+          
+          // ВІЗУАЛЬНИЙ ВІДГУК
+          block.setAttribute('animation__hover', 'property: scale; to: 1.3 1.3 1.3; startEvents: mouseenter; dur: 200');
+          block.setAttribute('animation__leave', 'property: scale; to: 1 1 1; startEvents: mouseleave; dur: 200');
+
+          // Клік по мікросервісу
+          block.addEventListener('click', (e) => {
+            e.stopPropagation(); 
+            showInfo(
+              "Мікросервіс (Docker-контейнер)", 
+              "Автономний модуль освітньої платформи (наприклад, сервіс тестів або відео). Оркестратор розгортає його, щоб впоратися з потоком студентів. Швидкість його обертання залежить від загального навантаження системи.", 
+              block.getAttribute('color')
+            );
+          });
+
+          dataGroup.appendChild(block);
+          blocks.push({ el: block, offsetX, y, offsetZ });
+        }
+
+        // Знищення мікросервісів
+        while (blocks.length > targetBlockCount) {
+          let b = blocks.pop();
+          if (dataGroup.contains(b.el)) {
+            b.el.removeAttribute('animation__spawn');
+            b.el.removeAttribute('animation__hover');
+            b.el.removeAttribute('animation__leave');
+            b.el.setAttribute('animation__scale', 'property: scale; to: 0 0 0; dur: 200');
+            setTimeout(() => { if (dataGroup.contains(b.el)) dataGroup.removeChild(b.el); }, 200);
+          }
+        }
+
+        // Міграція при Failover
+        blocks.forEach(b => {
+          b.el.setAttribute('color', isCrashed ? '#F1C40F' : '#00FFCC');
+          let currentPos = b.el.getAttribute('position');
+          let targetX = activeX + b.offsetX;
+          if (Math.abs(currentPos.x - targetX) > 0.5) {
+            b.el.setAttribute('animation__move', `property: position; to: ${targetX} ${b.y} ${b.offsetZ}; dur: 800; easing: easeInOutQuad`);
+          }
+        });
+
+      }, 500); 
+    });
+  </script>
+</body>
+</html>
